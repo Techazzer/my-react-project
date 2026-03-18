@@ -8,6 +8,14 @@ const axios = require("axios");
 const { google } = require("googleapis");
 const { sendUrgentEmail } = require("./mailer");
 
+// ── Global crash guards — prevent silent server death ─────────────────────────
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err.stack || err.message);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason?.stack || reason);
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -61,7 +69,11 @@ async function fetchPrintMastersheet() {
     throw new Error("Print Mastersheet env vars not configured");
   }
 
-  const privateKey = keyRaw.replace(/\\n/g, "\n");
+  // Normalize the key: Render stores newlines as literal \n or \\n;
+  // dotenv on local converts them automatically. Handle both cases.
+  const privateKey = keyRaw
+    .replace(/\\\\n/g, "\n") // double-escaped: \\n → newline
+    .replace(/\\n/g, "\n");  // single-escaped: \n  → newline
 
   const auth = new google.auth.JWT({
     email,
