@@ -5,7 +5,6 @@ const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
 const axios = require("axios");
-const { google } = require("googleapis");
 const { sendUrgentEmail } = require("./mailer");
 
 // ── Global crash guards — prevent silent server death ─────────────────────────
@@ -59,51 +58,23 @@ function getCache() {
 
 let isSyncing = false;
 
-// ── Google Sheets API (Print Mastersheet) ───────────────────────────────────
+// ── Published CSV (Print Mastersheet) ────────────────────────────────────────
+// No credentials needed — sheet must be published: File → Share → Publish to web → CSV
 async function fetchPrintMastersheet() {
-  const sheetId = process.env.GOOGLE_SHEET_PRINT_ID;
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const keyRaw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  const csvUrl = process.env.GOOGLE_SHEET_PRINT_CSV_URL;
+  if (!csvUrl) throw new Error("GOOGLE_SHEET_PRINT_CSV_URL env var not set");
 
-  if (!sheetId || !email || !keyRaw) {
-    throw new Error("Print Mastersheet env vars not configured");
-  }
+  const res = await axios.get(csvUrl, { responseType: "text", timeout: 30000 });
+  const lines = res.data.split(/\r?\n/);
+  if (lines.length < 2) return {};
 
-  // Normalize the key: Render stores newlines as literal \n or \\n;
-  // dotenv on local converts them automatically. Handle both cases.
-  const privateKey = keyRaw
-    .replace(/\\\\n/g, "\n") // double-escaped: \\n → newline
-    .replace(/\\n/g, "\n");  // single-escaped: \n  → newline
-
-  const auth = new google.auth.JWT({
-    email,
-    key: privateKey,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-  });
-
-  const printTab = process.env.GOOGLE_SHEET_PRINT_TAB || "";
-  const printRange = printTab ? `${printTab}!A:Q` : "A:Q";
-
-  const sheets = google.sheets({ version: "v4", auth });
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: printRange,
-  });
-
-  const rows = response.data.values || [];
-  if (rows.length < 2) return {};
-
-  // Skip header row. Build printData map:
-  // For each SKU, filter Col E = "In Print" AND Col I = "GGN"
-  // Then pick most recent by Col N (Sent to Printing Date)
   // Cols: A=SKU, E=Status, I=Warehouse, M=QtyOrdered, N=SentDate, O=PrinterETA, P=PrintingDoneDate, Q=GRNDate
   // Index:  0     4         8             12              13            14                15               16
 
-  const allRows = rows.slice(1); // skip header
+  const bySkuActive = {};
 
-  const bySkuActive = {}; // sku -> best row
-
-  for (const row of allRows) {
+  for (let i = 1; i < lines.length; i++) {
+    const row = parseCSVLine(lines[i]);
     const sku = (row[0] || "").trim();
     const status = (row[4] || "").trim();
     const warehouse = (row[8] || "").trim();
@@ -116,7 +87,6 @@ async function fetchPrintMastersheet() {
     if (!bySkuActive[sku]) {
       bySkuActive[sku] = row;
     } else {
-      // Pick most recent Sent to Printing date
       const existingSentStr = (bySkuActive[sku][13] || "").trim();
       const existingSent = existingSentStr ? new Date(existingSentStr) : null;
       if (sentDate && (!existingSent || sentDate > existingSent)) {
@@ -125,7 +95,6 @@ async function fetchPrintMastersheet() {
     }
   }
 
-  // Build normalized printData map
   const printData = {};
   for (const [sku, row] of Object.entries(bySkuActive)) {
     printData[sku] = {
@@ -139,6 +108,7 @@ async function fetchPrintMastersheet() {
 
   return printData;
 }
+
 
 // ── CSV Parser ───────────────────────────────────────────────────────────────
 function parseCSVLine(line) {
