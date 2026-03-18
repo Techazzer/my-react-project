@@ -759,7 +759,9 @@ function SKUCard({ item, showPerSKU, mappedFrom, lastMonthName, prevMonthName, p
 }
 
 // ─── Print Timeline Tab ───────────────────────────────────────────────────────
-const PRINT_SHEET_URL = `https://docs.google.com/spreadsheets/d/${import.meta.env.VITE_PRINT_SHEET_ID || "1jukH-tiSaUFicNcNCrpSOChL9OfPLkze0FYMTq7J4QE"}`;
+const PRINT_SHEET_ID = import.meta.env.VITE_PRINT_SHEET_ID || "1jukH-tiSaUFicNcNCrpSOChL9OfPLkze0FYMTq7J4QE";
+const PRINT_SHEET_GID = import.meta.env.VITE_PRINT_SHEET_GID || "";
+const PRINT_SHEET_URL = `https://docs.google.com/spreadsheets/d/${PRINT_SHEET_ID}/edit${PRINT_SHEET_GID ? `#gid=${PRINT_SHEET_GID}` : ""}`;
 
 function PrintTimelineTab({ data, printData }) {
   const today = new Date(); today.setHours(0,0,0,0);
