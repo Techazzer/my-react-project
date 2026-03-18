@@ -179,30 +179,33 @@ function parseGoogleSheetCSV(text) {
 async function performSync() {
   if (isSyncing) return;
   isSyncing = true;
-
   const cache = getCache();
-
   try {
-    console.log("Starting full sync...");
+    console.log("[SYNC] Starting full sync at", new Date().toISOString());
 
     const invUrl = process.env.GOOGLE_SHEET_INVENTORY_CSV_URL;
     const txnUrl = process.env.GOOGLE_SHEET_TRANSACTIONS_CSV_URL;
+    console.log("[SYNC] invUrl present:", !!invUrl, "| txnUrl present:", !!txnUrl);
     if (!invUrl || !txnUrl) throw new Error("Google Sheets CSV URLs missing in .env");
 
-    let txnSyncOk = true;
     let printSyncOk = true;
 
     // ── Fetch Inventory + Transactions CSVs ──────────────────────────────────
+    console.log("[SYNC] Fetching inventory CSV...");
     const [invRes, txnRes] = await Promise.all([
       axios.get(invUrl),
       axios.get(txnUrl)
     ]);
+    console.log("[SYNC] Inventory response status:", invRes.status, "| bytes:", invRes.data?.length);
+    console.log("[SYNC] Transactions response status:", txnRes.status, "| bytes:", txnRes.data?.length);
 
     const invCSV = invRes.data.trim();
     const txnCSVRaw = txnRes.data.trim();
+    console.log("[SYNC] invCSV lines:", invCSV.split("\n").length, "| txnCSV raw lines:", txnCSVRaw.split("\n").length);
 
     const txnRows = parseGoogleSheetCSV(txnCSVRaw);
-    if (txnRows.length < 2) throw new Error("Transaction sheet is empty");
+    if (txnRows.length < 2) throw new Error("Transaction sheet is empty after parsing");
+    console.log("[SYNC] Parsed txn rows:", txnRows.length, "| Headers:", txnRows[0].slice(0, 6).join(", "));
 
     const headers = txnRows[0].map(h => h.trim().toLowerCase());
     const findIdx = (names) => {
@@ -219,6 +222,7 @@ async function performSync() {
     const channelIdx = findIdx(["Channel Name", "Channel", "Source", "Store"]);
     const statusIdx = findIdx(["Status", "Order Status", "State"]);
     const isReverseIdx = findIdx(["Is Reverse", "Reverse"]);
+    console.log("[SYNC] Column indices — SKU:", skuIdx, "Qty:", qtyIdx, "Date:", dateIdx, "Channel:", channelIdx, "Status:", statusIdx);
 
     if (skuIdx === -1 || dateIdx === -1) {
       throw new Error(`Required headers not found. Got: ${headers.slice(0, 8).join(", ")}`);
@@ -235,41 +239,49 @@ async function performSync() {
       const channel = (channelIdx !== -1 ? row[channelIdx] : "Unknown").trim();
       const status = (statusIdx !== -1 ? row[statusIdx] : "NEW").trim();
       const isReverse = (isReverseIdx !== -1 ? row[isReverseIdx] : "No").trim();
-      const quote = (s) => `"${(s || "").replace(/"/g, '""')}"`;
-      normalizedTxns.push(`${quote(sku)},${qty},${quote(dateRaw)},${quote(channel)},${quote(status)},${quote(isReverse)}`);
+      const quote = (s) => `"${(s || "").replace(/"/g, '""')}`;
+      normalizedTxns.push(`${quote(sku)}",${qty},${quote(dateRaw)}",${quote(channel)}",${quote(status)}",${quote(isReverse)}"`);
     }
     const txnCSV = normalizedTxns.join("\n");
+    console.log("[SYNC] Normalized txn rows:", normalizedTxns.length - 1);
 
     // ── Fetch Print Mastersheet ───────────────────────────────────────────────
     let printData = cache.printData || {};
     let printDataStaleSince = null;
-
     try {
+      console.log("[SYNC] Fetching Print Mastersheet via Sheets API...");
+      console.log("[SYNC] GOOGLE_SHEET_PRINT_ID present:", !!process.env.GOOGLE_SHEET_PRINT_ID);
+      console.log("[SYNC] GOOGLE_SERVICE_ACCOUNT_EMAIL present:", !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+      console.log("[SYNC] GOOGLE_SERVICE_ACCOUNT_KEY present:", !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+      console.log("[SYNC] GOOGLE_SHEET_PRINT_TAB:", process.env.GOOGLE_SHEET_PRINT_TAB || "(blank - using first sheet)");
       printData = await fetchPrintMastersheet();
-      console.log(`Print Mastersheet synced: ${Object.keys(printData).length} active SKUs`);
+      console.log("[SYNC] Print Mastersheet OK — active SKUs:", Object.keys(printData).length);
     } catch (printErr) {
-      console.error("Print Mastersheet sync failed:", printErr.message);
+      console.error("[SYNC] Print Mastersheet FAILED:", printErr.message);
+      if (printErr.message.includes("403") || printErr.message.includes("PERMISSION")) {
+        console.error("[SYNC] → Check sheet is shared with:", process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+      }
+      if (printErr.message.includes("404")) {
+        console.error("[SYNC] → Check GOOGLE_SHEET_PRINT_ID is correct:", process.env.GOOGLE_SHEET_PRINT_ID);
+      }
+      if (printErr.message.includes("range") || printErr.message.includes("tab")) {
+        console.error("[SYNC] → Check GOOGLE_SHEET_PRINT_TAB is the exact tab name in the sheet");
+      }
       printSyncOk = false;
       printDataStaleSince = cache.printDataStaleSince || new Date().toISOString();
     }
 
-    // ── Save to cache ─────────────────────────────────────────────────────────
-    const newCache = {
-      invCSV,
-      txnCSV,
-      printData,
-      printDataStaleSince: printSyncOk ? null : printDataStaleSince,
-    };
+    // ── Save cache ────────────────────────────────────────────────────────────
+    const newCache = { invCSV, txnCSV, printData, printDataStaleSince: printSyncOk ? null : printDataStaleSince };
     fs.writeFileSync(CACHE_PATH, JSON.stringify(newCache));
-
     const cfg = getConfig();
     cfg.lastSynced = new Date().toISOString();
     if (printSyncOk) cfg.lastPrintSynced = new Date().toISOString();
     saveConfig(cfg);
-
-    console.log(`Sync complete: ${normalizedTxns.length - 1} txn rows · printOk=${printSyncOk}`);
+    console.log(`[SYNC] Done! invCSV:${invCSV.split("\n").length}lines txn:${normalizedTxns.length - 1}rows print:${Object.keys(printData).length}SKUs printOk:${printSyncOk}`);
   } catch (err) {
-    console.error("Sync failed:", err.message);
+    console.error("[SYNC] FAILED:", err.message);
+    console.error("[SYNC] Stack:", err.stack?.split("\n").slice(0, 3).join(" | "));
   } finally {
     isSyncing = false;
   }
@@ -331,11 +343,43 @@ app.get("/api/data", (req, res) => {
   res.set("Expires", "0");
   if (isSyncing) return res.status(503).json({ error: "Syncing in progress" });
   const cache = getCache();
+  const invLines = cache.invCSV ? cache.invCSV.split("\n").length - 1 : 0;
+  const txnLines = cache.txnCSV ? cache.txnCSV.split("\n").length - 1 : 0;
+  const printSKUs = cache.printData ? Object.keys(cache.printData).length : 0;
+  console.log(`[DATA] Serving cache: inv=${invLines} rows, txn=${txnLines} rows, print=${printSKUs} SKUs`);
   res.json({
     invCSV: cache.invCSV || "",
     txnCSV: cache.txnCSV || "",
     printData: cache.printData || {},
     printDataStaleSince: cache.printDataStaleSince || null,
+    _meta: { invLines, txnLines, printSKUs },
+  });
+});
+
+app.get("/api/debug", (req, res) => {
+  const cache = getCache();
+  const cfg = getConfig();
+  res.json({
+    timestamp: new Date().toISOString(),
+    isSyncing,
+    lastSynced: cfg.lastSynced,
+    lastPrintSynced: cfg.lastPrintSynced,
+    env: {
+      hasInvUrl: !!process.env.GOOGLE_SHEET_INVENTORY_CSV_URL,
+      hasTxnUrl: !!process.env.GOOGLE_SHEET_TRANSACTIONS_CSV_URL,
+      hasPrintId: !!process.env.GOOGLE_SHEET_PRINT_ID,
+      printId: process.env.GOOGLE_SHEET_PRINT_ID || "(not set)",
+      printTab: process.env.GOOGLE_SHEET_PRINT_TAB || "(blank - first sheet)",
+      hasServiceEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      serviceEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "(not set)",
+      hasServiceKey: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
+    },
+    cache: {
+      invCSV_lines: cache.invCSV ? cache.invCSV.split("\n").length : 0,
+      txnCSV_lines: cache.txnCSV ? cache.txnCSV.split("\n").length : 0,
+      printData_skus: cache.printData ? Object.keys(cache.printData).length : 0,
+      printDataStaleSince: cache.printDataStaleSince || null,
+    },
   });
 });
 
