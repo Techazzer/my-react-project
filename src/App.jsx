@@ -198,7 +198,7 @@ function processData(invRows, txnRows, statusText, mappedText) {
     const info = statusLookup[sku] || {};
     masterData[sku] = {
       sku,
-      name: (inv["Product Name"] || info.name || sku).trim(),
+      name: (inv["Name"] || inv["Product Name"] || info.name || sku).trim(),
       stock: parseFloat(inv["Available Inventory - Good"] || inv["Current Stock"] || inv["Available Inventory"] || inv["Quantity"]) || 0,
       status_tag: info.status || "Active"
     };
@@ -994,10 +994,13 @@ export default function App() {
   const [printDataStale, setPrintDataStale] = useState(false);
   const [printDataStaleSince, setPrintDataStaleSince] = useState(null);
 
-  // Log Drawer States (permanent, session-scoped)
-  const [syncLog, setSyncLog] = useState([]);
+  // Log Drawer States (permanent, persisted to localStorage)
+  const [syncLog, setSyncLog] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("sync_log") || "[]"); } catch { return []; }
+  });
   const [showLog, setShowLog] = useState(false);
   const prevPrintDataRef = useRef({});
+  const isInitialFetch = useRef(true); // skip diff on very first load
 
   // Settings & Configuration States
   const [skuStatusText, setSkuStatusText] = useState(null);
@@ -1049,7 +1052,11 @@ export default function App() {
   };
 
   const addLogEntry = (entry) => {
-    setSyncLog(prev => [entry, ...prev]);
+    setSyncLog(prev => {
+      const next = [entry, ...prev];
+      try { localStorage.setItem("sync_log", JSON.stringify(next)); } catch {}
+      return next;
+    });
   };
 
   const fetchApiData = async (isManualSync = false) => {
@@ -1071,28 +1078,32 @@ export default function App() {
         setPrintDataStale(!!staleSince);
         setPrintDataStaleSince(staleSince);
 
-        // Diff for log
+        // Diff for log — skip on very first load to avoid false "22 new SKUs" entries
         const prevPrint = prevPrintDataRef.current || {};
         const printChanges = [];
-        const allSKUs = new Set([...Object.keys(prevPrint), ...Object.keys(newPrintData)]);
-        allSKUs.forEach(sku => {
-          const wasIn = !!prevPrint[sku];
-          const isIn = !!newPrintData[sku];
-          const wasGRN = prevPrint[sku]?.grnDate;
-          const isGRN = newPrintData[sku]?.grnDate;
-          if (!wasIn && isIn) printChanges.push({ sku, to: "In Print (new order)" });
-          else if (wasIn && !isIn) printChanges.push({ sku, to: "Not In Print" });
-          else if (wasIn && isIn && !wasGRN && isGRN) printChanges.push({ sku, to: "Received ✓" });
-          else if (wasIn && isIn) {
-            const prevPrinterETA = prevPrint[sku]?.printerETA;
-            const newPrinterETA = newPrintData[sku]?.printerETA;
-            const today = new Date(); today.setHours(0,0,0,0);
-            const isDelayed = newPrinterETA && new Date(newPrinterETA) < today && !isGRN;
-            const wasDelayed = prevPrinterETA && new Date(prevPrinterETA) < today && !wasGRN;
-            if (isDelayed && !wasDelayed) printChanges.push({ sku, to: "Printer Delayed" });
-          }
-        });
+
+        if (!isInitialFetch.current) {
+          const allSKUs = new Set([...Object.keys(prevPrint), ...Object.keys(newPrintData)]);
+          allSKUs.forEach(sku => {
+            const wasIn = !!prevPrint[sku];
+            const isIn = !!newPrintData[sku];
+            const wasGRN = prevPrint[sku]?.grnDate;
+            const isGRN = newPrintData[sku]?.grnDate;
+            if (!wasIn && isIn) printChanges.push({ sku, to: "In Print (new order)" });
+            else if (wasIn && !isIn) printChanges.push({ sku, to: "Not In Print" });
+            else if (wasIn && isIn && !wasGRN && isGRN) printChanges.push({ sku, to: "Received ✓" });
+            else if (wasIn && isIn) {
+              const prevPrinterETA = prevPrint[sku]?.printerETA;
+              const newPrinterETA = newPrintData[sku]?.printerETA;
+              const today = new Date(); today.setHours(0,0,0,0);
+              const isDelayed = newPrinterETA && new Date(newPrinterETA) < today && !isGRN;
+              const wasDelayed = prevPrinterETA && new Date(prevPrinterETA) < today && !wasGRN;
+              if (isDelayed && !wasDelayed) printChanges.push({ sku, to: "Printer Delayed" });
+            }
+          });
+        }
         prevPrintDataRef.current = newPrintData;
+        isInitialFetch.current = false;
 
         // Log entry
         const skuCount = d.invCSV ? d.invCSV.split("\n").length - 1 : 0;
@@ -1640,7 +1651,7 @@ export default function App() {
                   <input type="password" placeholder="Password" value={authPwd} onChange={e => setAuthPwd(e.target.value)}
                     className="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-3 text-white mb-4 focus:border-indigo-500 focus:outline-none"
                   />
-                  <button onClick={() => { if (authPwd === "Testbook") setIsAuth(true); else alert("Incorrect password"); }}
+                  <button onClick={() => { if (authPwd === "Testbook_new") setIsAuth(true); else alert("Incorrect password"); }}
                     className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-all">
                     Unlock Settings
                   </button>

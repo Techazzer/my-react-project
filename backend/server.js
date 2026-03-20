@@ -381,4 +381,12 @@ setupCronJobs();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Backend API running on http://localhost:${PORT}`);
+  // Auto-sync on startup if cache is empty (covers Render cold starts)
+  const startupCache = getCache();
+  if (!startupCache.invCSV) {
+    console.log("No cache found on startup — triggering initial sync...");
+    performSync();
+  } else {
+    console.log("Cache found — skipping startup sync.");
+  }
 });
